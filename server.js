@@ -15,7 +15,7 @@ if (!process.env.JWT_SECRET) {
 
 // Set default MongoDB URI if not in env
 if (!process.env.MONGODB_URI) {
-    process.env.MONGODB_URI = 'mongodb://localhost:27017/skyview';
+    // process.env.MONGODB_URI = 'mongodb://localhost:27017/skyview';
     console.log('Using default MONGODB_URI');
 }
 
