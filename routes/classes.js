@@ -5,7 +5,7 @@ const Student = require('../models/Student');
 const auth = require('../middleware/auth');
 
 // Get all classes with student count
-router.get('/', auth, async (req, res) => {
+router.get('/', async (req, res) => {
     try {
         const classes = await ClassDetails.find()
             .select('className section academicYear classTeacher subjects createdAt updatedAt')
