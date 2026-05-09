@@ -3,6 +3,93 @@ const LessonPlan = require("../models/LessonPlan");
 const ClassDetails = require("../models/ClassDetails");
 const router = express.Router();
 
+const validMethods = ["Board Work", "Reading", "Q & A Method", "Discussion", "Activity", "Demonstration", "Group Work"];
+const validTeachingAids = ["Chart", "Video", "PPT", "Textbook"];
+const validAssessments = ["Oral", "Written", "Project", "Quiz"];
+
+function validateLessons(chapters) {
+    if (!Array.isArray(chapters) || chapters.length === 0) {
+        return "At least one chapter is required";
+    }
+
+    for (const chapter of chapters) {
+        if (!chapter.chapterNo || !chapter.chapterName || !Array.isArray(chapter.lessons) || chapter.lessons.length === 0) {
+            return "Each chapter must have a number, name, and at least one lesson";
+        }
+
+        for (const lesson of chapter.lessons) {
+            if (!lesson.day || !lesson.topic || !lesson.method) {
+                return "Each lesson must have a day, topic, and method";
+            }
+            if (!validMethods.includes(lesson.method)) {
+                return `Invalid method: ${lesson.method}. Must be one of: ${validMethods.join(', ')}`;
+            }
+            if (lesson.teachingAids && !lesson.teachingAids.every(aid => validTeachingAids.includes(aid))) {
+                return `Invalid teaching aid. Must be one of: ${validTeachingAids.join(', ')}`;
+            }
+            if (lesson.assessment && !lesson.assessment.every(a => validAssessments.includes(a))) {
+                return `Invalid assessment. Must be one of: ${validAssessments.join(', ')}`;
+            }
+        }
+    }
+
+    return "";
+}
+
+router.put("/:className/:subjectName/save", async (req, res) => {
+    try {
+        const { academicYear, teacherName, chapters } = req.body;
+        const validationMessage = validateLessons(chapters);
+
+        if (!academicYear) {
+            return res.status(400).json({ message: "Academic year is required" });
+        }
+
+        if (validationMessage) {
+            return res.status(400).json({ message: validationMessage });
+        }
+
+        let lessonPlan = await LessonPlan.findOne({ className: req.params.className });
+        if (!lessonPlan) {
+            lessonPlan = new LessonPlan({
+                className: req.params.className,
+                subjects: []
+            });
+        }
+
+        const normalizedSubject = {
+            subjectName: req.params.subjectName,
+            academicYear,
+            teacherName: teacherName || "",
+            chapters: chapters.map((chapter) => ({
+                chapterNo: Number(chapter.chapterNo),
+                chapterName: String(chapter.chapterName).trim(),
+                lessons: chapter.lessons.map((lesson) => ({
+                    day: Number(lesson.day),
+                    topic: String(lesson.topic).trim(),
+                    method: lesson.method,
+                    teachingAids: Array.isArray(lesson.teachingAids) ? lesson.teachingAids : [],
+                    assessment: Array.isArray(lesson.assessment) ? lesson.assessment : [],
+                    remarks: lesson.remarks || ""
+                }))
+            }))
+        };
+
+        const subjectIndex = lessonPlan.subjects.findIndex((subject) => subject.subjectName === req.params.subjectName);
+        if (subjectIndex === -1) {
+            lessonPlan.subjects.push(normalizedSubject);
+        } else {
+            lessonPlan.subjects.set(subjectIndex, normalizedSubject);
+        }
+
+        await lessonPlan.save();
+        res.status(200).json({ message: "Lesson plan saved successfully", lessonPlan });
+    } catch (error) {
+        console.error("Error saving lesson plan:", error);
+        res.status(500).json({ message: "Failed to save lesson plan", error: error.message });
+    }
+});
+
 
 
 router.put("/:className/:subjectName/add-chapter", async (req, res) => {
@@ -137,6 +224,17 @@ router.get("/", async (req, res) => {
 });
 
 // ✅ 3. Get lesson plans by class
+// Get all classes that have lesson plans
+router.get("/classes", async (req, res) => {
+    try {
+        const plans = await LessonPlan.find({}, 'className');
+        const classes = plans.map(plan => ({ name: plan.className }));
+        res.status(200).json(classes);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 router.get("/:className", async (req, res) => {
     try {
         const plan = await LessonPlan.findOne({ className: req.params.className });
@@ -398,31 +496,22 @@ router.get("/:className/:subjectName", async (req, res) => {
         const formattedLessons = [];
         subject.chapters.forEach(chapter => {
             chapter.lessons.forEach(lesson => {
-                formattedLessons.push({
-                    chapterNo: chapter.chapterNo,
-                    chapterName: chapter.chapterName,
-                    day: lesson.day,
-                    topic: lesson.topic,
-                    method: lesson.method,
-                    teachingAids: Array.isArray(lesson.teachingAids) ? lesson.teachingAids.join(", ") : lesson.teachingAids,
-                    assessment: Array.isArray(lesson.assessment) ? lesson.assessment.join(", ") : lesson.assessment,
-                    remarks: lesson.remarks || ""
-                });
+            formattedLessons.push({
+                chapterNo: chapter.chapterNo,
+                chapterName: chapter.chapterName,
+                academicYear: subject.academicYear,
+                teacherName: subject.teacherName || "",
+                day: lesson.day,
+                topic: lesson.topic,
+                method: lesson.method,
+                    teachingAids: Array.isArray(lesson.teachingAids) ? lesson.teachingAids : [],
+                    assessment: Array.isArray(lesson.assessment) ? lesson.assessment : [],
+                remarks: lesson.remarks || ""
+            });
             });
         });
 
         res.status(200).json(formattedLessons);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Get all classes that have lesson plans
-router.get("/classes", async (req, res) => {
-    try {
-        const plans = await LessonPlan.find({}, 'className');
-        const classes = plans.map(plan => ({ name: plan.className }));
-        res.status(200).json(classes);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }

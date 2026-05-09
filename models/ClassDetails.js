@@ -104,32 +104,4 @@ ClassDetailsSchema.post('save', function(doc) {
 // Create model
 const ClassDetails = mongoose.model('ClassDetails', ClassDetailsSchema);
 
-// Function to update existing documents
-async function updateExistingDocuments() {
-    try {
-        console.log('\n=== Running update for existing documents ===');
-        const result = await ClassDetails.updateMany(
-            { 
-                $or: [
-                    { classTeacher: { $exists: false } },
-                    { subjects: { $exists: false } }
-                ]
-            },
-            { 
-                $set: { 
-                    classTeacher: 'Not Assigned',
-                    subjects: []
-                } 
-            }
-        );
-        console.log('Update result:', result);
-        console.log('=== Update complete ===\n');
-    } catch (error) {
-        console.error('Error updating existing documents:', error);
-    }
-}
-
-// Call update function
-updateExistingDocuments();
-
 module.exports = ClassDetails;

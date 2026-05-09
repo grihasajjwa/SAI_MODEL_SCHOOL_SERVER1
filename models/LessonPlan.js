@@ -6,6 +6,7 @@ const lessonPlanSchema = new mongoose.Schema({
         {
             subjectName: { type: String, required: true }, // e.g., "Mathematics"
             academicYear: { type: String, required: true }, // e.g., "2024-2025"
+            teacherName: { type: String },
             chapters: [
                 {
                     chapterNo: { type: Number, required: true },

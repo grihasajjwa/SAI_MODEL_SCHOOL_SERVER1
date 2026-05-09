@@ -3,8 +3,7 @@ const mongoose = require('mongoose');
 const studentSchema = new mongoose.Schema({
     studentId: {
         type: String,
-        required: true,
-        unique: true
+        required: true
     },
     name: {
         type: String,
@@ -13,6 +12,10 @@ const studentSchema = new mongoose.Schema({
     fatherName: {
         type: String,
         required: true
+    },
+    motherName: {
+        type: String,
+        default: ''
     },
     dob: {
         type: Date,
@@ -41,6 +44,11 @@ const studentSchema = new mongoose.Schema({
     },
     address: String,
     contactNo: String,
+    tuitionFee: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
     transport: {
         required: {
             type: Boolean,
@@ -75,6 +83,11 @@ const studentSchema = new mongoose.Schema({
             required: function() {
                 return this.transport.required;
             }
+        },
+        pickupOrder: {
+            type: Number,
+            default: null,
+            min: 1
         }
     },
     session: {
@@ -84,6 +97,10 @@ const studentSchema = new mongoose.Schema({
     rank: {
         type: Number,
         default: null
+    },
+    photo: {
+        type: String,
+        default: ''
     },
     exams: {
         pt1: {
@@ -135,6 +152,8 @@ const studentSchema = new mongoose.Schema({
     timestamps: true
 });
 
+// Same admission number can exist across sessions; keep each session unique.
+studentSchema.index({ studentId: 1, session: 1 }, { unique: true });
 studentSchema.index({ studentId: 1 });
 studentSchema.index({ class: 1, section: 1 });
 

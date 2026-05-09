@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Marks = require('../models/Marks');
+const Student = require('../models/Student');
 const auth = require('../middleware/auth');
 const mongoose = require('mongoose');
 
@@ -20,13 +21,31 @@ router.get('/', async (req, res) => {
 router.get('/:studentId', auth, async (req, res) => {
     try {
         let studentId = req.params.studentId;
+        const academicYear = req.query.academicYear;
         
         // Check if studentId is a valid ObjectId
         if (!mongoose.Types.ObjectId.isValid(studentId)) {
             return res.status(404).json({ message: 'Invalid student ID format' });
         }
 
-        const marks = await Marks.findOne({ studentId: studentId });
+        const query = { studentId: studentId };
+        if (academicYear) {
+            query.academicYear = academicYear;
+        }
+
+        let marks = await Marks.findOne(query).sort({ createdAt: -1 });
+
+        // Legacy fallback:
+        // some older data was saved under the wrong academicYear, but still linked
+        // to the correct student record. If there is exactly one marks document for
+        // this student, return it instead of a 404 so old data remains accessible.
+        if (!marks && academicYear) {
+            const fallbackMarks = await Marks.find({ studentId: studentId }).sort({ createdAt: -1 });
+            if (fallbackMarks.length === 1) {
+                marks = fallbackMarks[0];
+            }
+        }
+
         if (!marks) {
             return res.status(404).json({ message: 'Marks not found' });
         }
@@ -40,14 +59,42 @@ router.get('/:studentId', auth, async (req, res) => {
 // Get marks by class and section
 router.get('/class/:className/:section', auth, async (req, res) => {
     try {
-        const marks = await Marks.find({
+        const query = {
             className: req.params.className,
             section: req.params.section
-        }).populate({
+        };
+        if (req.query.academicYear) {
+            query.academicYear = req.query.academicYear;
+        }
+
+        let marks = await Marks.find(query).populate({
             path: 'studentId',
             model: 'Student',
             select: 'name studentId fatherName'
         });
+
+        // Legacy fallback for class/session views:
+        // if no marks exist for the requested academicYear, try returning marks linked
+        // to the students currently in that class/section/session even if those marks
+        // were saved under the wrong academicYear.
+        if ((!marks || marks.length === 0) && req.query.academicYear) {
+            const sessionStudents = await Student.find({
+                class: req.params.className,
+                section: req.params.section,
+                session: req.query.academicYear
+            }).select('_id');
+
+            const studentIds = sessionStudents.map((student) => student._id);
+            if (studentIds.length > 0) {
+                marks = await Marks.find({
+                    studentId: { $in: studentIds }
+                }).populate({
+                    path: 'studentId',
+                    model: 'Student',
+                    select: 'name studentId fatherName'
+                });
+            }
+        }
         
         //console.log(`Found ${marks.length} marks records for Class ${req.params.className} Section ${req.params.section}`);
         res.json(marks);
@@ -61,6 +108,11 @@ router.get('/class/:className/:section', auth, async (req, res) => {
 router.post('/', auth, async (req, res) => {
     try {
         const { studentId, className, section, academicYear, marks, studentName, admissionNo, fatherName, rollNo,  coScholastic, attendance, teacherRemarks  } = req.body;
+
+        const existing = await Marks.findOne({ studentId, academicYear });
+        if (existing) {
+            return res.status(409).json({ message: 'Marks already exist for this student in this academic year' });
+        }
         
         // Create new marks document
         const marksDoc = new Marks({
@@ -121,7 +173,7 @@ router.put('/:studentId', auth, async (req, res) => {
         
         // If validation passes, update the marks
         const updatedMarks = await Marks.findOneAndUpdate(
-            { studentId: studentId },
+            { studentId: studentId, academicYear },
             { 
                 $set: { 
                     marks,

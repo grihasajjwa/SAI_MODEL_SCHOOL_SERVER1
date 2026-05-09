@@ -1,63 +1,93 @@
 const xlsx = require('xlsx');
 const path = require('path');
 
-// Create a new workbook
-const wb = xlsx.utils.book_new();
-
-// Define the headers
 const headers = [
     'Admission No',
     'Student Name',
-    'Class',
     'Father Name',
     'Date of Birth',
     'Gender',
     'Admission Date',
-    'Address',
-    'Contact No',
+    'Class',
     'Section',
+    'Roll No',
+    'Contact No',
+    'Address',
+    'Tuition Fee',
     'Transport Required',
     'Transport Fees',
     'Transport Start Date',
     'Bus Number',
     'Pickup Point',
-    'Route'
+    'Route',
+    'Pickup Order'
 ];
 
-// Create sample data
-const sampleData = [
+const sampleRows = [
     {
         'Admission No': 'SV2024001',
         'Student Name': 'John Doe',
-        'Class': '1',
         'Father Name': 'James Doe',
-        'Date of Birth': '2018-01-01',
+        'Date of Birth': new Date('2018-01-15'),
         'Gender': 'Male',
-        'Admission Date': '2024-01-01',
-        'Address': '123 Main St',
-        'Contact No': '9876543210',
+        'Admission Date': new Date('2024-04-10'),
+        'Class': 'I',
         'Section': 'A',
+        'Roll No': '1',
+        'Contact No': '9876543210',
+        'Address': '123 Main St',
+        'Tuition Fee': 1200,
         'Transport Required': 'Yes',
-        'Transport Fees': '1000',
-        'Transport Start Date': '2024-01-01',
+        'Transport Fees': 900,
+        'Transport Start Date': new Date('2024-04-15'),
         'Bus Number': 'B001',
         'Pickup Point': 'Main Gate',
-        'Route': 'Route 1'
+        'Route': 'Route 1',
+        'Pickup Order': 1
+    },
+    {
+        'Admission No': 'SV2024002',
+        'Student Name': 'Jane Smith',
+        'Father Name': 'Robert Smith',
+        'Date of Birth': new Date('2017-08-20'),
+        'Gender': 'Female',
+        'Admission Date': new Date('2024-04-10'),
+        'Class': 'I',
+        'Section': 'A',
+        'Roll No': '2',
+        'Contact No': '9123456780',
+        'Address': '45 Lake View',
+        'Tuition Fee': 1500,
+        'Transport Required': 'No',
+        'Transport Fees': '',
+        'Transport Start Date': '',
+        'Bus Number': '',
+        'Pickup Point': '',
+        'Route': '',
+        'Pickup Order': ''
     }
 ];
 
-// Create worksheet
-const ws = xlsx.utils.json_to_sheet(sampleData, { header: headers });
+const workbook = xlsx.utils.book_new();
+const worksheet = xlsx.utils.json_to_sheet(sampleRows, {
+    header: headers,
+    dateNF: 'yyyy-mm-dd'
+});
 
-// Set column widths
-const colWidths = headers.map(header => ({ wch: Math.max(header.length, 15) }));
-ws['!cols'] = colWidths;
+worksheet['!cols'] = headers.map((header) => ({ wch: Math.max(header.length + 2, 16) }));
 
-// Add the worksheet to the workbook
-xlsx.utils.book_append_sheet(wb, ws, 'Students');
+for (let rowIndex = 2; rowIndex <= sampleRows.length + 1; rowIndex += 1) {
+    ['D', 'F', 'O'].forEach((column) => {
+        const cellRef = `${column}${rowIndex}`;
+        if (worksheet[cellRef]) {
+            worksheet[cellRef].z = 'yyyy-mm-dd';
+        }
+    });
+}
 
-// Write to file
-const templatePath = path.join(__dirname, '..', '..', 'skyview-client', 'assets', 'templates', 'student_import_template.xlsx');
-xlsx.writeFile(wb, templatePath);
+xlsx.utils.book_append_sheet(workbook, worksheet, 'Students');
+
+const templatePath = path.join(__dirname, '..', '..', 'client', 'assets', 'templates', 'student_import_template.xlsx');
+xlsx.writeFile(workbook, templatePath);
 
 console.log('Template created successfully at:', templatePath);

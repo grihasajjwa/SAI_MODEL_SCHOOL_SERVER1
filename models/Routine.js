@@ -18,12 +18,13 @@ const daySchema = new mongoose.Schema({
 }, { _id: false });
 
 const routineSchema = new mongoose.Schema({
+  session: { type: String, required: true, trim: true, default: "Default" },
   class: { type: String, required: true, trim: true },
   schedule: [daySchema]
 }, { timestamps: true });
 
-// Index on class name (you can add compound indexes if needed)
-routineSchema.index({ class: 1 }, { unique: true });
+// Each class can have one routine per academic session
+routineSchema.index({ session: 1, class: 1 }, { unique: true });
 
 const Routine = mongoose.model('Routine', routineSchema);
 module.exports = Routine;

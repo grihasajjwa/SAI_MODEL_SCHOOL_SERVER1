@@ -32,6 +32,37 @@ router.get('/', async (req, res) => {
     }
 });
 
+// Get classes by academic year with student count filtered by session
+router.get('/year/:academicYear', auth, async (req, res) => {
+    try {
+        const { academicYear } = req.params;
+        
+        const classes = await ClassDetails.find({ academicYear })
+            .select('className section academicYear classTeacher subjects createdAt updatedAt')
+            .sort({ className: 1, section: 1 });
+
+        // Get student count for each class filtered by session
+        const classesWithCount = await Promise.all(classes.map(async (classData) => {
+            const studentCount = await Student.countDocuments({
+                class: classData.className,
+                section: classData.section,
+                session: academicYear
+            });
+
+            return {
+                ...classData.toObject(),
+                studentCount
+            };
+        }));
+
+        console.log(`Fetched ${classesWithCount.length} classes for year ${academicYear} with session-filtered student count`);
+        res.json(classesWithCount);
+    } catch (error) {
+        console.error('Error fetching classes by academic year:', error);
+        res.status(500).json({ message: error.message });
+    }
+});
+
 // Get single class with student count
 router.get('/:id', auth, async (req, res) => {
     try {
@@ -417,6 +448,17 @@ router.delete('/:id', auth, async (req, res) => {
         const classData = await ClassDetails.findById(req.params.id);
         if (!classData) {
             return res.status(404).json({ message: 'Class not found' });
+        }
+
+        const studentCount = await Student.countDocuments({
+            class: classData.className,
+            section: classData.section
+        });
+
+        if (studentCount > 0) {
+            return res.status(400).json({
+                message: `Cannot delete class. ${studentCount} student(s) are still assigned to ${classData.className} - ${classData.section}.`
+            });
         }
 
         await classData.deleteOne();
