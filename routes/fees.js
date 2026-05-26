@@ -2,11 +2,18 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const router = express.Router();
 const Student = require('../models/Student');
+const AcademicSession = require('../models/AcademicSession');
 const FeeTransaction = require('../models/FeeTransaction');
 const FeePaymentAccount = require('../models/FeePaymentAccount');
+const FeeParticular = require('../models/FeeParticular');
 const ExpenseHead = require('../models/ExpenseHead');
 const ExpenseTransaction = require('../models/ExpenseTransaction');
 const TransactionAuditLog = require('../models/TransactionAuditLog');
+const FuelCentre = require('../models/FuelCentre');
+const BusVehicle = require('../models/BusVehicle');
+const FuelLedgerEntry = require('../models/FuelLedgerEntry');
+const Supplier = require('../models/Supplier');
+const SupplierLedgerEntry = require('../models/SupplierLedgerEntry');
 
 const DEFAULT_EXPENSE_HEADS = [
     'Salary',
@@ -18,8 +25,29 @@ const DEFAULT_EXPENSE_HEADS = [
     'Internet',
     'Books',
     'Uniform',
+    'Supplier Payment',
     'Event',
     'Miscellaneous'
+];
+const DEFAULT_FEE_PARTICULARS = [
+    'Admission Fee',
+    'Re-Admission Fee',
+    'Development Fee',
+    'Tuition Fee',
+    'Exam Fee',
+    'Books Fee',
+    'Uniform Fee',
+    'Diary Fee',
+    'I-card',
+    'Library',
+    'Computer Lab',
+    'AC Fee',
+    'Digital Smart class',
+    'Exercise Copy',
+    'Transport Fee',
+    'Late Fee',
+    'Others',
+    'Due Payment'
 ];
 const AUDIT_IGNORED_FIELDS = new Set(['__v', 'updatedAt']);
 const FINANCE_MUTATION_ROLES = new Set(['admin', 'accountant']);
@@ -68,6 +96,53 @@ function buildVoucherNo() {
 
 function escapeRegex(value) {
     return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function exactCaseInsensitiveRegex(value) {
+    return `^${escapeRegex(String(value || '').trim())}$`;
+}
+
+function getSearchKeywords(value = '') {
+    return String(value || '')
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+}
+
+function appendAndCondition(query, condition) {
+    if (!query.$and) {
+        query.$and = [];
+    }
+    query.$and.push(condition);
+}
+
+function appendKeywordConditions(query, field, value) {
+    getSearchKeywords(value).forEach((keyword) => {
+        appendAndCondition(query, {
+            [field]: { $regex: escapeRegex(keyword), $options: 'i' }
+        });
+    });
+}
+
+function buildLineItemParticularKeywordFilter(value) {
+    const keywords = getSearchKeywords(value);
+    if (!keywords.length) return null;
+
+    return {
+        $elemMatch: {
+            $and: keywords.map((keyword) => ({
+                particular: { $regex: escapeRegex(keyword), $options: 'i' }
+            }))
+        }
+    };
+}
+
+function normalizeFeeParticularName(value = '') {
+    return String(value || '')
+        .trim()
+        .replace(/\s+/g, ' ')
+        .toLowerCase()
+        .replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
 }
 
 function getAuditActor(req) {
@@ -148,6 +223,104 @@ function activeRecordFilter(extra = {}) {
 
 function includeDeletedFilter(extra = {}) {
     return { ...extra };
+}
+
+async function resolveSessionDateRange(session) {
+    const sessionName = String(session || '').trim();
+    if (!sessionName) return null;
+
+    const sessionRecord = await AcademicSession.findOne({ name: sessionName }).lean();
+    const parsedYears = sessionName.match(/(\d{4})\D+(\d{4})/);
+    const startDate = sessionRecord?.startDate
+        ? new Date(sessionRecord.startDate)
+        : parsedYears
+            ? new Date(Number(parsedYears[1]), 3, 1)
+            : null;
+    const endDate = sessionRecord?.endDate
+        ? new Date(sessionRecord.endDate)
+        : parsedYears
+            ? new Date(Number(parsedYears[2]), 2, 31)
+            : null;
+
+    if (!startDate || !endDate || Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+        return null;
+    }
+
+    endDate.setHours(23, 59, 59, 999);
+    return { startDate, endDate };
+}
+
+function resolveCollectionMonthRange(sessionRange, monthName) {
+    if (!sessionRange) return null;
+
+    const targetMonthIndex = [
+        'january', 'february', 'march', 'april', 'may', 'june',
+        'july', 'august', 'september', 'october', 'november', 'december'
+    ].indexOf(String(monthName || '').trim().toLowerCase());
+
+    if (targetMonthIndex < 0) return null;
+
+    const cursor = new Date(sessionRange.startDate.getFullYear(), sessionRange.startDate.getMonth(), 1);
+    const lastMonth = new Date(sessionRange.endDate.getFullYear(), sessionRange.endDate.getMonth(), 1);
+
+    while (cursor <= lastMonth) {
+        if (cursor.getMonth() === targetMonthIndex) {
+            const startDate = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+            const endDate = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0, 23, 59, 59, 999);
+            return {
+                startDate: startDate < sessionRange.startDate ? sessionRange.startDate : startDate,
+                endDate: endDate > sessionRange.endDate ? sessionRange.endDate : endDate
+            };
+        }
+
+        cursor.setMonth(cursor.getMonth() + 1);
+    }
+
+    return null;
+}
+
+function normalizeReceiptPaymentBreakdown(receipt = {}) {
+    if (Array.isArray(receipt.paymentBreakdown) && receipt.paymentBreakdown.length) {
+        return receipt.paymentBreakdown.map((entry) => ({
+            baseMode: entry.baseMode === 'Cash' ? 'Cash' : 'Online',
+            amount: safeNumber(entry.amount)
+        }));
+    }
+
+    const fallbackAmount = safeNumber(receipt.paidAmount);
+    if (!fallbackAmount) return [];
+
+    return [{
+        baseMode: receipt.paymentMode === 'Cash' ? 'Cash' : 'Online',
+        amount: fallbackAmount
+    }];
+}
+
+function isDuePaymentExpense(expense = {}) {
+    return (expense.paymentBreakdown || []).some((entry) => String(entry.modeLabel || '').trim().toLowerCase() === 'due payment')
+        || String(expense.paidFor || '').trim().toLowerCase() === 'due payment';
+}
+
+function normalizeExpensePaymentBreakdown(expense = {}) {
+    if (Array.isArray(expense.paymentBreakdown) && expense.paymentBreakdown.length) {
+        return expense.paymentBreakdown.map((entry) => ({
+            baseMode: entry.baseMode === 'Online' ? 'Online' : 'Cash',
+            amount: safeNumber(entry.amount)
+        }));
+    }
+
+    const fallbackAmount = safeNumber(expense.amount);
+    if (!fallbackAmount) return [];
+
+    return [{
+        baseMode: expense.paymentMode === 'Online' ? 'Online' : 'Cash',
+        amount: fallbackAmount
+    }];
+}
+
+function addCashbookAmount(totals, entry = {}, sign = 1) {
+    const key = entry.baseMode === 'Online' ? 'online' : 'cash';
+    totals[key] += safeNumber(entry.amount) * sign;
 }
 
 function getEditReason(req) {
@@ -276,12 +449,51 @@ async function ensureDefaultFeePaymentAccounts() {
     await FeePaymentAccount.create({ name: 'Online-1' });
 }
 
+async function ensureDefaultFeeParticulars() {
+    const existingParticulars = await FeeParticular.find({
+        name: { $in: DEFAULT_FEE_PARTICULARS }
+    }).select('name').lean();
+
+    const existingNames = new Set(existingParticulars.map((particular) => particular.name));
+    const missingParticulars = DEFAULT_FEE_PARTICULARS
+        .filter((name) => !existingNames.has(name))
+        .map((name) => ({ name }));
+
+    if (missingParticulars.length) {
+        await FeeParticular.insertMany(missingParticulars, { ordered: false });
+    }
+}
+
+async function saveFeeParticularNames(names = []) {
+    const normalizedNames = [...new Set(
+        names
+            .map((name) => normalizeFeeParticularName(name))
+            .filter(Boolean)
+    )];
+
+    await Promise.all(normalizedNames.map(async (name) => {
+        const existingParticular = await FeeParticular.findOne({
+            name: { $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' }
+        });
+
+        if (existingParticular) {
+            if (!existingParticular.isActive) {
+                existingParticular.isActive = true;
+                await existingParticular.save();
+            }
+            return existingParticular;
+        }
+
+        return FeeParticular.create({ name });
+    }));
+}
+
 function normalizeExpensePaymentBreakdown(rawPaymentBreakdown = [], fallbackPaymentMode = 'Cash', fallbackAmount = 0) {
     const normalizedFallbackBaseMode = fallbackPaymentMode === 'Cash' ? 'Cash' : 'Online';
     const normalizedEntries = (Array.isArray(rawPaymentBreakdown) ? rawPaymentBreakdown : [])
         .map((entry) => {
             const modeLabel = String(entry?.modeLabel || entry?.label || entry?.paymentMode || '').trim();
-            const inferredBaseMode = String(entry?.baseMode || (modeLabel && modeLabel !== 'Cash' ? 'Online' : normalizedFallbackBaseMode)).trim();
+            const inferredBaseMode = String(entry?.baseMode || (modeLabel && !['Cash', 'Due', 'Due Payment'].includes(modeLabel) ? 'Online' : normalizedFallbackBaseMode)).trim();
 
             return {
                 modeLabel: modeLabel || (inferredBaseMode === 'Online' ? 'Online-1' : 'Cash'),
@@ -314,6 +526,24 @@ function getExpensePaymentModeSummary(paymentBreakdown = []) {
     return 'Mixed';
 }
 
+function normalizeSalaryExpenseDetails(rawSalaryDetails = null, expense = {}) {
+    if (!rawSalaryDetails || typeof rawSalaryDetails !== 'object') {
+        return null;
+    }
+
+    const head = String(expense.headOfAccount || '').trim().toLowerCase();
+    if (head !== 'salary') {
+        return null;
+    }
+
+    return {
+        employeeName: String(rawSalaryDetails.employeeName || expense.paidTo || '').trim(),
+        salaryMonth: String(rawSalaryDetails.salaryMonth || '').trim(),
+        grossSalary: Math.max(0, safeNumber(rawSalaryDetails.grossSalary)),
+        advanceAdjusted: Math.max(0, safeNumber(rawSalaryDetails.advanceAdjusted))
+    };
+}
+
 function getExpenseModeTotals(expense = {}) {
     const normalizedBreakdown = normalizeExpensePaymentBreakdown(
         expense.paymentBreakdown,
@@ -331,6 +561,220 @@ function getExpenseModeTotals(expense = {}) {
     }, { cash: 0, online: 0 });
 }
 
+function isFuelExpensePayload(payload = {}) {
+    const head = String(payload.headOfAccount || '').toLowerCase();
+    const paidFor = String(payload.paidFor || '').toLowerCase();
+    return head.includes('fuel') || paidFor.includes('fuel');
+}
+
+function hasFuelDetails(rawFuelDetails = null) {
+    if (!rawFuelDetails || typeof rawFuelDetails !== 'object') {
+        return false;
+    }
+
+    return ['fuelCentreName', 'receiptNo', 'vehicleNumber', 'volumeLtr', 'recordedKmMeter']
+        .some((field) => String(rawFuelDetails[field] ?? '').trim() !== '');
+}
+
+function isSupplierPaymentPayload(payload = {}) {
+    const head = String(payload.headOfAccount || '').toLowerCase();
+    const paidFor = String(payload.paidFor || '').toLowerCase();
+    return head.includes('supplier') || paidFor.includes('supplier') || paidFor.includes('purchase payment');
+}
+
+function hasSupplierDetails(rawSupplierDetails = null) {
+    if (!rawSupplierDetails || typeof rawSupplierDetails !== 'object') return false;
+    return String(rawSupplierDetails.supplierName || '').trim() !== '';
+}
+
+async function ensureSupplierRecord(name) {
+    const supplierName = String(name || '').trim();
+    if (!supplierName) return;
+    const supplier = await Supplier.findOne({ name: { $regex: `^${escapeRegex(supplierName)}$`, $options: 'i' } });
+    if (!supplier) {
+        await Supplier.create({ name: supplierName });
+    } else if (!supplier.isActive) {
+        supplier.isActive = true;
+        await supplier.save();
+    }
+}
+
+async function ensureFuelOptionRecords(fuelDetails = {}) {
+    const fuelCentreName = String(fuelDetails.fuelCentreName || '').trim();
+    const vehicleNumber = String(fuelDetails.vehicleNumber || '').trim().toUpperCase();
+
+    if (fuelCentreName) {
+        const existingCentre = await FuelCentre.findOne({
+            name: { $regex: `^${escapeRegex(fuelCentreName)}$`, $options: 'i' }
+        });
+        if (!existingCentre) {
+            await FuelCentre.create({ name: fuelCentreName });
+        } else if (!existingCentre.isActive) {
+            existingCentre.isActive = true;
+            await existingCentre.save();
+        }
+    }
+
+    if (vehicleNumber) {
+        const existingVehicle = await BusVehicle.findOne({
+            vehicleNumber: { $regex: `^${escapeRegex(vehicleNumber)}$`, $options: 'i' }
+        });
+        if (!existingVehicle) {
+            await BusVehicle.create({ vehicleNumber });
+        } else if (!existingVehicle.isActive) {
+            existingVehicle.isActive = true;
+            await existingVehicle.save();
+        }
+    }
+}
+
+function validateAndBuildFuelDetails(rawFuelDetails = {}, expense = {}) {
+    const shouldTrackFuel = isFuelExpensePayload(expense) || hasFuelDetails(rawFuelDetails);
+
+    if (!shouldTrackFuel) {
+        return { status: null, body: null };
+    }
+
+    const fuelDetails = rawFuelDetails || {};
+    const fuelDate = fuelDetails.fuelDate || fuelDetails.date || expense.expenseDate || new Date();
+    const normalizedFuelDate = new Date(fuelDate);
+    const fuelCentreName = String(fuelDetails.fuelCentreName || expense.paidTo || '').trim();
+    const receiptNo = String(fuelDetails.receiptNo || expense.voucherNo || '').trim();
+    const vehicleNumber = String(fuelDetails.vehicleNumber || '').trim().toUpperCase();
+    const volumeLtr = safeNumber(fuelDetails.volumeLtr);
+    const amount = safeNumber(fuelDetails.amount || expense.amount);
+    const recordedKmMeter = safeNumber(fuelDetails.recordedKmMeter);
+    const notes = String(fuelDetails.notes || expense.notes || '').trim();
+
+    if (Number.isNaN(normalizedFuelDate.getTime())) {
+        return { status: 400, body: { success: false, message: 'Invalid fuel date' } };
+    }
+
+    if (!fuelCentreName) {
+        return {
+            status: 400,
+            body: { success: false, message: 'Fuel centre name is required for fuel expenses' }
+        };
+    }
+
+    return {
+        status: null,
+        body: {
+            fuelDate: normalizedFuelDate,
+            fuelCentreName,
+            receiptNo,
+            vehicleNumber,
+            volumeLtr,
+            amount,
+            recordedKmMeter,
+            notes
+        }
+    };
+}
+
+async function syncFuelLedgerForExpense(expense, rawFuelDetails = null) {
+    const existingEntry = await FuelLedgerEntry.findOne({ expenseId: expense._id });
+    const fuelResult = validateAndBuildFuelDetails(rawFuelDetails, expense);
+
+    if (fuelResult.status) {
+        return fuelResult;
+    }
+
+    if (!isFuelExpensePayload(expense) && !hasFuelDetails(rawFuelDetails)) {
+        if (existingEntry && !existingEntry.isDeleted) {
+            existingEntry.isDeleted = true;
+            await existingEntry.save();
+        }
+        return { status: null, body: null };
+    }
+
+    await ensureFuelOptionRecords(fuelResult.body);
+
+    const payload = {
+        ...fuelResult.body,
+        expenseId: expense._id,
+        expenseVoucherNo: expense.voucherNo,
+        isDeleted: false
+    };
+
+    if (existingEntry) {
+        Object.assign(existingEntry, payload);
+        await existingEntry.save();
+        return { status: null, body: existingEntry };
+    }
+
+    const entry = await FuelLedgerEntry.create(payload);
+    return { status: null, body: entry };
+}
+
+function validateAndBuildSupplierPaymentDetails(rawSupplierDetails = {}, expense = {}) {
+    const shouldTrackSupplier = isSupplierPaymentPayload(expense) || hasSupplierDetails(rawSupplierDetails);
+    if (!shouldTrackSupplier) return { status: null, body: null };
+
+    const supplierDetails = rawSupplierDetails || {};
+    const supplierName = String(supplierDetails.supplierName || expense.paidTo || '').trim();
+    const entryDate = new Date(supplierDetails.entryDate || supplierDetails.paymentDate || expense.expenseDate || new Date());
+    const amount = safeNumber(supplierDetails.amount || expense.amount);
+    const notes = String(supplierDetails.notes || expense.notes || expense.paidFor || '').trim();
+
+    if (Number.isNaN(entryDate.getTime())) {
+        return { status: 400, body: { success: false, message: 'Invalid supplier payment date' } };
+    }
+    if (!supplierName) {
+        return { status: 400, body: { success: false, message: 'Supplier name is required for supplier payment' } };
+    }
+    if (amount <= 0) {
+        return { status: 400, body: { success: false, message: 'Supplier payment amount must be greater than zero' } };
+    }
+
+    return {
+        status: null,
+        body: {
+            entryDate,
+            supplierName,
+            itemName: 'Payment',
+            billNo: expense.voucherNo || '',
+            quantity: 0,
+            rate: 0,
+            amount,
+            notes,
+            entryType: 'PAYMENT'
+        }
+    };
+}
+
+async function syncSupplierLedgerForExpense(expense, rawSupplierDetails = null) {
+    const existingEntry = await SupplierLedgerEntry.findOne({ expenseId: expense._id });
+    const supplierResult = validateAndBuildSupplierPaymentDetails(rawSupplierDetails, expense);
+
+    if (supplierResult.status) return supplierResult;
+
+    if (!isSupplierPaymentPayload(expense) && !hasSupplierDetails(rawSupplierDetails)) {
+        if (existingEntry && !existingEntry.isDeleted) {
+            existingEntry.isDeleted = true;
+            await existingEntry.save();
+        }
+        return { status: null, body: null };
+    }
+
+    await ensureSupplierRecord(supplierResult.body.supplierName);
+    const payload = {
+        ...supplierResult.body,
+        expenseId: expense._id,
+        expenseVoucherNo: expense.voucherNo,
+        isDeleted: false
+    };
+
+    if (existingEntry) {
+        Object.assign(existingEntry, payload);
+        await existingEntry.save();
+        return { status: null, body: existingEntry };
+    }
+
+    const entry = await SupplierLedgerEntry.create(payload);
+    return { status: null, body: entry };
+}
+
 async function validateAndBuildExpensePayload({
     voucherNo,
     headOfAccount,
@@ -339,6 +783,7 @@ async function validateAndBuildExpensePayload({
     amount,
     paymentMode,
     paymentBreakdown: rawPaymentBreakdown,
+    salaryDetails: rawSalaryDetails,
     notes,
     expenseDate,
     excludeExpenseId = null
@@ -373,8 +818,11 @@ async function validateAndBuildExpensePayload({
         paymentMode,
         amount
     );
+    const isSalaryAdvanceOnlyAdjustment = normalizedHead.toLowerCase() === 'salary'
+        && safeNumber(rawSalaryDetails?.advanceAdjusted) > 0
+        && !normalizedPaymentBreakdown.length;
 
-    if (!normalizedPaymentBreakdown.length) {
+    if (!normalizedPaymentBreakdown.length && !isSalaryAdvanceOnlyAdjustment) {
         return { status: 400, body: { success: false, message: 'Please add at least one payment row with amount' } };
     }
 
@@ -397,7 +845,7 @@ async function validateAndBuildExpensePayload({
     }
 
     const normalizedAmount = normalizedPaymentBreakdown.reduce((sum, entry) => sum + safeNumber(entry.amount), 0);
-    if (normalizedAmount <= 0) {
+    if (normalizedAmount <= 0 && !isSalaryAdvanceOnlyAdjustment) {
         return { status: 400, body: { success: false, message: 'Expense amount must be greater than zero' } };
     }
 
@@ -422,28 +870,40 @@ async function validateAndBuildExpensePayload({
         await existingHead.save();
     }
 
+    const expensePayload = {
+        voucherNo: normalizedVoucherNo,
+        headOfAccount: normalizedHead,
+        paidTo: normalizedPaidTo,
+        paidFor: normalizedPaidFor,
+        amount: normalizedAmount,
+        paymentMode: getExpensePaymentModeSummary(normalizedPaymentBreakdown),
+        paymentBreakdown: normalizedPaymentBreakdown,
+        notes: normalizedNotes,
+        expenseDate: normalizedExpenseDate
+    };
+
+    const salaryDetails = normalizeSalaryExpenseDetails(rawSalaryDetails, expensePayload);
+    if (salaryDetails) {
+        expensePayload.salaryDetails = salaryDetails;
+    }
+
     return {
         status: null,
-        body: {
-            voucherNo: normalizedVoucherNo,
-            headOfAccount: normalizedHead,
-            paidTo: normalizedPaidTo,
-            paidFor: normalizedPaidFor,
-            amount: normalizedAmount,
-            paymentMode: getExpensePaymentModeSummary(normalizedPaymentBreakdown),
-            paymentBreakdown: normalizedPaymentBreakdown,
-            notes: normalizedNotes,
-            expenseDate: normalizedExpenseDate
-        }
+        body: expensePayload
     };
 }
 
 async function getFeeAggregateSummary(admissionNo) {
+    const normalizedAdmissionNo = String(admissionNo || '').trim();
     const aggregateTotals = await FeeTransaction.aggregate([
-        { $match: activeRecordFilter({ admissionNo }) },
+        {
+            $match: activeRecordFilter({
+                admissionNo: { $regex: exactCaseInsensitiveRegex(normalizedAdmissionNo), $options: 'i' }
+            })
+        },
         {
             $group: {
-                _id: '$admissionNo',
+                _id: null,
                 totalPaid: { $sum: '$paidAmount' },
                 totalCharges: { $sum: '$currentChargesTotal' },
                 transactionCount: { $sum: 1 },
@@ -474,7 +934,8 @@ async function getFeeAggregateSummary(admissionNo) {
 }
 
 async function getStudentWithFeeSummary(admissionNo, session = '') {
-    const studentQuery = { studentId: admissionNo };
+    const normalizedAdmissionNo = String(admissionNo || '').trim();
+    const studentQuery = { studentId: { $regex: exactCaseInsensitiveRegex(normalizedAdmissionNo), $options: 'i' } };
     if (session) {
         studentQuery.session = session;
     }
@@ -484,12 +945,14 @@ async function getStudentWithFeeSummary(admissionNo, session = '') {
         return null;
     }
 
-    const transactions = await FeeTransaction.find(activeRecordFilter({ admissionNo }))
+    const transactions = await FeeTransaction.find(activeRecordFilter({
+        admissionNo: { $regex: exactCaseInsensitiveRegex(normalizedAdmissionNo), $options: 'i' }
+    }))
         .sort({ createdAt: -1 })
         .limit(25)
         .lean();
 
-    const totals = await getFeeAggregateSummary(admissionNo);
+    const totals = await getFeeAggregateSummary(normalizedAdmissionNo);
 
     return {
         student,
@@ -509,6 +972,7 @@ async function getStudentWithFeeSummary(admissionNo, session = '') {
 async function validateAndBuildReceiptPayload({
     admissionNo,
     voucherNo, // ✅ added
+    session,
     month,
     receiptDate,
     paymentMode,
@@ -531,10 +995,18 @@ async function validateAndBuildReceiptPayload({
         };
     }
     
-    const student = await Student.findOne({ studentId: admissionNo }).lean();
+    const requestedSession = String(session || '').trim();
+    const normalizedAdmissionNo = String(admissionNo || '').trim();
+    const studentQuery = { studentId: { $regex: exactCaseInsensitiveRegex(normalizedAdmissionNo), $options: 'i' } };
+    if (requestedSession) {
+        studentQuery.session = requestedSession;
+    }
+
+    const student = await Student.findOne(studentQuery).sort({ createdAt: -1 }).lean();
     if (!student) {
         return { status: 404, body: { success: false, message: 'Student not found' } };
     }
+    const normalizedSession = String(student.session || requestedSession || '').trim();
 
     const lineItems = (Array.isArray(rawLineItems) ? rawLineItems : [])
         .map((item) => ({
@@ -543,7 +1015,7 @@ async function validateAndBuildReceiptPayload({
         }))
         .filter((item) => item.particular && item.amount > 0);
 
-    const feeSummary = await getFeeAggregateSummary(admissionNo);
+    const feeSummary = await getFeeAggregateSummary(student.studentId);
     let previousDueAmount = feeSummary.previousDueAmount;
 
     if (excludeReceiptId) {
@@ -626,7 +1098,8 @@ async function validateAndBuildReceiptPayload({
     if (lineItems.some((item) => item.particular === 'Tuition Fee') && normalizedMonth) {
         const existingMonthCharge = await FeeTransaction.exists({
             isDeleted: { $ne: true },
-            admissionNo,
+            admissionNo: { $regex: exactCaseInsensitiveRegex(student.studentId), $options: 'i' },
+            session: normalizedSession,
             month: normalizedMonth,
             _id: excludeReceiptId ? { $ne: excludeReceiptId } : { $exists: true },
             lineItems: { $elemMatch: { particular: 'Tuition Fee' } }
@@ -637,7 +1110,7 @@ async function validateAndBuildReceiptPayload({
                 status: 400,
                 body: {
                     success: false,
-                    message: `Tuition Fee for ${normalizedMonth} is already recorded for this student`
+                    message: `Tuition Fee for ${normalizedMonth} is already recorded for this student in session ${normalizedSession || '-'}`
                 }
             };
         }
@@ -678,6 +1151,7 @@ if (existingVoucher) {
             className: student.class,
             section: student.section || '',
             rollNo: student.rollNo || '',
+            session: normalizedSession,
             month: normalizedMonth,
             paymentMode: normalizedPaymentMode,
             paymentBreakdown: normalizedPaymentBreakdown.length
@@ -779,11 +1253,40 @@ router.get('/dashboard', async (req, res) => {
 router.get('/today-transactions', async (req, res) => {
     try {
         if (!requireFinanceView(req, res)) return;
-        const today = new Date();
-        const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 0, 0, 0, 0);
-        const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
+        const requestedDate = String(req.query.date || '').trim();
+        let reportDate = new Date();
 
-        const [receipts, expenses] = await Promise.all([
+        if (requestedDate) {
+            const [year, month, day] = requestedDate.split('-').map(Number);
+
+            if (!year || !month || !day) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid date format. Use YYYY-MM-DD.'
+                });
+            }
+
+            reportDate = new Date(year, month - 1, day);
+
+            if (
+                Number.isNaN(reportDate.getTime())
+                || reportDate.getFullYear() !== year
+                || reportDate.getMonth() !== month - 1
+                || reportDate.getDate() !== day
+            ) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid date format. Use YYYY-MM-DD.'
+                });
+            }
+        }
+
+        const startOfDay = new Date(reportDate.getFullYear(), reportDate.getMonth(), reportDate.getDate(), 0, 0, 0, 0);
+        const endOfDay = new Date(reportDate.getFullYear(), reportDate.getMonth(), reportDate.getDate(), 23, 59, 59, 999);
+        const previousClosingEnd = new Date(startOfDay);
+        previousClosingEnd.setMilliseconds(-1);
+
+        const [receipts, expenses, previousReceipts, previousExpenses] = await Promise.all([
             FeeTransaction.find(activeRecordFilter({
                 receiptDate: { $gte: startOfDay, $lte: endOfDay }
             }))
@@ -793,8 +1296,29 @@ router.get('/today-transactions', async (req, res) => {
                 expenseDate: { $gte: startOfDay, $lte: endOfDay }
             }))
                 .sort({ expenseDate: -1, createdAt: -1 })
+                .lean(),
+            FeeTransaction.find(activeRecordFilter({
+                receiptDate: { $lte: previousClosingEnd }
+            }))
+                .select('paidAmount paymentMode paymentBreakdown')
+                .lean(),
+            ExpenseTransaction.find(activeRecordFilter({
+                expenseDate: { $lte: previousClosingEnd }
+            }))
+                .select('amount paymentMode paymentBreakdown paidFor')
                 .lean()
         ]);
+
+        const opening = { cash: 0, online: 0 };
+
+        previousReceipts.forEach((receipt) => {
+            normalizeReceiptPaymentBreakdown(receipt).forEach((entry) => addCashbookAmount(opening, entry, 1));
+        });
+
+        previousExpenses.forEach((expense) => {
+            const sign = isDuePaymentExpense(expense) ? 1 : -1;
+            normalizeExpensePaymentBreakdown(expense).forEach((entry) => addCashbookAmount(opening, entry, sign));
+        });
 
         const feeCash = receipts.reduce((sum, item) => {
             const breakdownCash = (item.paymentBreakdown || [])
@@ -823,6 +1347,8 @@ router.get('/today-transactions', async (req, res) => {
 
         const totalIncome = receipts.reduce((sum, item) => sum + safeNumber(item.paidAmount), 0);
         const totalExpense = expenses.reduce((sum, item) => sum + safeNumber(item.amount), 0);
+        const netCash = opening.cash + feeCash - expenseCash;
+        const netOnline = opening.online + feeOnline - expenseOnline;
 
         return res.json({
             success: true,
@@ -832,13 +1358,16 @@ router.get('/today-transactions', async (req, res) => {
             summary: {
                 feeCash,
                 feeOnline,
+                openingCash: opening.cash,
+                openingOnline: opening.online,
+                openingBalance: opening.cash + opening.online,
                 expenseCash,
                 expenseOnline,
-                netCash: feeCash - expenseCash,
-                netOnline: feeOnline - expenseOnline,
+                netCash,
+                netOnline,
                 totalIncome,
                 totalExpense,
-                netBalance: totalIncome - totalExpense,
+                netBalance: netCash + netOnline,
                 receiptCount: receipts.length,
                 expenseCount: expenses.length
             }
@@ -991,10 +1520,12 @@ router.get('/transactions', async (req, res) => {
         if (!requireFinanceView(req, res)) return;
         const {
             admissionNo,
+            studentName,
             month,
             className,
             paymentMode,
             particular,
+            collectionMonth,
             startDate,
             endDate,
             session,
@@ -1008,7 +1539,11 @@ router.get('/transactions', async (req, res) => {
             : activeRecordFilter();
 
         if (admissionNo) {
-            query.admissionNo = { $regex: admissionNo.trim(), $options: 'i' };
+            query.admissionNo = { $regex: exactCaseInsensitiveRegex(admissionNo), $options: 'i' };
+        }
+
+        if (studentName) {
+            appendKeywordConditions(query, 'studentName', studentName);
         }
 
         if (month) {
@@ -1024,26 +1559,56 @@ router.get('/transactions', async (req, res) => {
         }
 
         if (particular) {
-            query.lineItems = {
-                $elemMatch: {
-                    particular: { $regex: escapeRegex(particular.trim()), $options: 'i' }
-                }
-            };
+            const particularFilter = buildLineItemParticularKeywordFilter(particular);
+            if (particularFilter) {
+                query.lineItems = particularFilter;
+            }
         }
 
-        if (session) {
-            // Parse session (e.g., "2025-2026" -> startYear: 2025, endYear: 2026)
-            const [startYear, endYear] = session.split('-').map(year => parseInt(year));
-            
-            // Create date range for the session
-            const sessionStartDate = new Date(startYear, 3, 1); // April 1st of start year
-            const sessionEndDate = new Date(endYear, 2, 31); // March 31st of end year
-            
+        let hasCollectionMonthFilter = false;
+
+        if (collectionMonth) {
+            if (!session) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Session is required when filtering by collection month'
+                });
+            }
+
+            const sessionRange = await resolveSessionDateRange(session);
+            const collectionMonthRange = resolveCollectionMonthRange(sessionRange, collectionMonth);
+
+            if (!collectionMonthRange) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Selected collection month is outside the session date range'
+                });
+            }
+
             query.receiptDate = {
-                $gte: sessionStartDate,
-                $lte: sessionEndDate
+                $gte: collectionMonthRange.startDate,
+                $lte: collectionMonthRange.endDate
             };
-        } else if (startDate || endDate) {
+            hasCollectionMonthFilter = true;
+        }
+
+        if (session && !hasCollectionMonthFilter) {
+            const sessionName = String(session).trim();
+            const [startYear, endYear] = sessionName.split('-').map((year) => parseInt(year, 10));
+            const sessionConditions = [{ session: sessionName }];
+
+            if (Number.isFinite(startYear) && Number.isFinite(endYear)) {
+                sessionConditions.push({
+                    session: { $in: ['', null] },
+                    receiptDate: {
+                        $gte: new Date(startYear, 3, 1),
+                        $lte: new Date(endYear, 2, 31, 23, 59, 59, 999)
+                    }
+                });
+            }
+
+            query.$or = sessionConditions;
+        } else if (!hasCollectionMonthFilter && (startDate || endDate)) {
             query.receiptDate = {};
             if (startDate) {
                 query.receiptDate.$gte = new Date(startDate);
@@ -1115,6 +1680,66 @@ router.get('/payment-accounts', async (req, res) => {
         return res.status(500).json({
             success: false,
             message: 'Error fetching fee payment accounts'
+        });
+    }
+});
+
+router.get('/particulars', async (req, res) => {
+    try {
+        if (!requireFinanceView(req, res)) return;
+        await ensureDefaultFeeParticulars();
+
+        const [particulars, receiptParticulars] = await Promise.all([
+            FeeParticular.find({ isActive: true })
+                .sort({ name: 1 })
+                .lean(),
+            FeeTransaction.distinct('lineItems.particular', activeRecordFilter())
+        ]);
+
+        const names = [...new Set([
+            ...particulars.map((particular) => particular.name),
+            ...receiptParticulars.map((name) => normalizeFeeParticularName(name)).filter(Boolean)
+        ])].sort((a, b) => a.localeCompare(b));
+
+        return res.json({
+            success: true,
+            particulars: names.map((name) => ({ name }))
+        });
+    } catch (error) {
+        console.error('Fee particulars fetch error:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Error fetching fee particulars'
+        });
+    }
+});
+
+router.post('/particulars', async (req, res) => {
+    try {
+        if (!requireFinanceMutation(req, res)) return;
+        const name = normalizeFeeParticularName(req.body.name);
+        if (!name) {
+            return res.status(400).json({
+                success: false,
+                message: 'Particular name is required'
+            });
+        }
+
+        await saveFeeParticularNames([name]);
+        const particular = await FeeParticular.findOne({
+            name: { $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' }
+        }).lean();
+
+        return res.status(201).json({
+            success: true,
+            message: 'Fee particular saved successfully',
+            particular: particular || { name }
+        });
+    } catch (error) {
+        console.error('Fee particular create error:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Error saving fee particular'
         });
     }
 });
@@ -1240,7 +1865,7 @@ router.get('/audit-logs', async (req, res) => {
         }
 
         if (admissionNo) {
-            query.admissionNo = { $regex: escapeRegex(admissionNo.trim()), $options: 'i' };
+            query.admissionNo = { $regex: exactCaseInsensitiveRegex(admissionNo), $options: 'i' };
         }
 
         if (startDate || endDate) {
@@ -1434,6 +2059,61 @@ router.get('/expenses', async (req, res) => {
     }
 });
 
+router.get('/cashbook/opening', async (req, res) => {
+    try {
+        if (!requireFinanceView(req, res)) return;
+        const { beforeDate } = req.query;
+
+        if (!beforeDate) {
+            return res.json({
+                success: true,
+                opening: { cash: 0, online: 0 }
+            });
+        }
+
+        const end = new Date(beforeDate);
+        if (Number.isNaN(end.getTime())) {
+            return res.status(400).json({
+                success: false,
+                message: 'Valid beforeDate is required'
+            });
+        }
+        end.setHours(23, 59, 59, 999);
+
+        const [receipts, expenses] = await Promise.all([
+            FeeTransaction.find(activeRecordFilter({ receiptDate: { $lte: end } }))
+                .select('paidAmount paymentMode paymentBreakdown')
+                .lean(),
+            ExpenseTransaction.find(activeRecordFilter({ expenseDate: { $lte: end } }))
+                .select('amount paymentMode paymentBreakdown paidFor')
+                .lean()
+        ]);
+
+        const opening = { cash: 0, online: 0 };
+
+        receipts.forEach((receipt) => {
+            normalizeReceiptPaymentBreakdown(receipt).forEach((entry) => addCashbookAmount(opening, entry, 1));
+        });
+
+        expenses.forEach((expense) => {
+            const sign = isDuePaymentExpense(expense) ? 1 : -1;
+            normalizeExpensePaymentBreakdown(expense).forEach((entry) => addCashbookAmount(opening, entry, sign));
+        });
+
+        return res.json({
+            success: true,
+            beforeDate,
+            opening
+        });
+    } catch (error) {
+        console.error('Cashbook opening balance error:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Error calculating opening balance'
+        });
+    }
+});
+
 router.get('/expenses/next-voucher', async (req, res) => {
     try {
         if (!requireFinanceMutation(req, res)) return;
@@ -1462,9 +2142,22 @@ router.get('/expenses/:id', async (req, res) => {
             });
         }
 
+        const fuelDetails = await FuelLedgerEntry.findOne({
+            expenseId: expense._id,
+            isDeleted: { $ne: true }
+        }).lean();
+        const supplierDetails = await SupplierLedgerEntry.findOne({
+            expenseId: expense._id,
+            isDeleted: { $ne: true }
+        }).lean();
+
         return res.json({
             success: true,
-            expense
+            expense: {
+                ...expense,
+                fuelDetails: fuelDetails || null,
+                supplierDetails: supplierDetails || null
+            }
         });
     } catch (error) {
         console.error('Expense fetch error:', error);
@@ -1486,6 +2179,7 @@ router.post('/expenses', async (req, res) => {
             amount: req.body.amount,
             paymentMode: req.body.paymentMode,
             paymentBreakdown: req.body.paymentBreakdown,
+            salaryDetails: req.body.salaryDetails,
             notes: req.body.notes,
             expenseDate: req.body.expenseDate
         });
@@ -1494,7 +2188,27 @@ router.post('/expenses', async (req, res) => {
             return res.status(result.status).json(result.body);
         }
 
+        const fuelResult = validateAndBuildFuelDetails(req.body.fuelDetails, result.body);
+        if (fuelResult.status) {
+            return res.status(fuelResult.status).json(fuelResult.body);
+        }
+        const supplierResult = validateAndBuildSupplierPaymentDetails(req.body.supplierDetails, result.body);
+        if (supplierResult.status) {
+            return res.status(supplierResult.status).json(supplierResult.body);
+        }
+
         const expense = await ExpenseTransaction.create(result.body);
+        const syncedFuel = await syncFuelLedgerForExpense(expense, req.body.fuelDetails || null);
+        if (syncedFuel.status) {
+            await ExpenseTransaction.findByIdAndDelete(expense._id);
+            return res.status(syncedFuel.status).json(syncedFuel.body);
+        }
+        const syncedSupplier = await syncSupplierLedgerForExpense(expense, req.body.supplierDetails || null);
+        if (syncedSupplier.status) {
+            await ExpenseTransaction.findByIdAndDelete(expense._id);
+            return res.status(syncedSupplier.status).json(syncedSupplier.body);
+        }
+
         await recordTransactionAudit({
             req,
             entityType: 'Expense',
@@ -1510,7 +2224,11 @@ router.post('/expenses', async (req, res) => {
         return res.status(201).json({
             success: true,
             message: 'Expense saved successfully',
-            expense
+            expense: {
+                ...expense.toObject(),
+                fuelDetails: syncedFuel.body || null,
+                supplierDetails: syncedSupplier.body || null
+            }
         });
     } catch (error) {
         console.error('Expense save error:', error);
@@ -1549,6 +2267,7 @@ router.put('/expenses/:id', async (req, res) => {
             amount: req.body.amount,
             paymentMode: req.body.paymentMode,
             paymentBreakdown: req.body.paymentBreakdown,
+            salaryDetails: req.body.salaryDetails,
             notes: req.body.notes,
             expenseDate: req.body.expenseDate,
             excludeExpenseId: existingExpense._id
@@ -1558,8 +2277,26 @@ router.put('/expenses/:id', async (req, res) => {
             return res.status(result.status).json(result.body);
         }
 
+        const fuelResult = validateAndBuildFuelDetails(req.body.fuelDetails, result.body);
+        if (fuelResult.status) {
+            return res.status(fuelResult.status).json(fuelResult.body);
+        }
+        const supplierResult = validateAndBuildSupplierPaymentDetails(req.body.supplierDetails, result.body);
+        if (supplierResult.status) {
+            return res.status(supplierResult.status).json(supplierResult.body);
+        }
+
         Object.assign(existingExpense, result.body);
         await existingExpense.save();
+        const syncedFuel = await syncFuelLedgerForExpense(existingExpense, req.body.fuelDetails || null);
+        if (syncedFuel.status) {
+            return res.status(syncedFuel.status).json(syncedFuel.body);
+        }
+        const syncedSupplier = await syncSupplierLedgerForExpense(existingExpense, req.body.supplierDetails || null);
+        if (syncedSupplier.status) {
+            return res.status(syncedSupplier.status).json(syncedSupplier.body);
+        }
+
         await recordTransactionAudit({
             req,
             entityType: 'Expense',
@@ -1575,7 +2312,11 @@ router.put('/expenses/:id', async (req, res) => {
         return res.json({
             success: true,
             message: 'Expense updated successfully',
-            expense: existingExpense
+            expense: {
+                ...existingExpense.toObject(),
+                fuelDetails: syncedFuel.body || null,
+                supplierDetails: syncedSupplier.body || null
+            }
         });
     } catch (error) {
         console.error('Expense update error:', error);
@@ -1586,7 +2327,7 @@ router.put('/expenses/:id', async (req, res) => {
     }
 });
 
-router.delete('/expenses/:id', async (req, res) => {
+async function handleExpenseDelete(req, res) {
     try {
         const actor = requireFinanceDelete(req, res);
         if (!actor) return;
@@ -1613,6 +2354,14 @@ router.delete('/expenses/:id', async (req, res) => {
         deletedExpense.deletedBy = actor;
         deletedExpense.deleteReason = deleteReason;
         await deletedExpense.save();
+        await FuelLedgerEntry.updateMany(
+            { expenseId: deletedExpense._id },
+            { $set: { isDeleted: true } }
+        );
+        await SupplierLedgerEntry.updateMany(
+            { expenseId: deletedExpense._id },
+            { $set: { isDeleted: true } }
+        );
 
         await recordTransactionAudit({
             req,
@@ -1637,7 +2386,10 @@ router.delete('/expenses/:id', async (req, res) => {
             message: 'Error deleting expense'
         });
     }
-});
+}
+
+router.delete('/expenses/:id', handleExpenseDelete);
+router.post('/expenses/:id/delete', handleExpenseDelete);
 
 router.put('/expenses/:id/recover', async (req, res) => {
     try {
@@ -1700,6 +2452,8 @@ router.post('/receipt', async (req, res) => {
             return res.status(result.status).json(result.body);
         }
 
+        await saveFeeParticularNames((result.payload.lineItems || []).map((item) => item.particular));
+
         const receipt = await FeeTransaction.create({
             receiptNo: buildReceiptNo(),
             ...result.payload
@@ -1758,6 +2512,8 @@ router.put('/receipt/:id', async (req, res) => {
         if (result.status) {
             return res.status(result.status).json(result.body);
         }
+
+        await saveFeeParticularNames((result.payload.lineItems || []).map((item) => item.particular));
 
         const receipt = await FeeTransaction.findByIdAndUpdate(
             req.params.id,
@@ -1916,77 +2672,88 @@ router.get('/collection-by-session', async (req, res) => {
             });
         }
 
-        // Parse session (e.g., "2025-2026" -> startYear: 2025, endYear: 2026)
-        const [startYear, endYear] = session.split('-').map(year => parseInt(year));
-        
-        // Create date range for the session
-        const startDate = new Date(startYear, 3, 1); // April 1st of start year
-        const endDate = new Date(endYear, 2, 31); // March 31st of end year
+        const sessionRecord = await AcademicSession.findOne({ name: session }).lean();
+        const parsedYears = String(session).match(/(\d{4})\D+(\d{4})/);
+        const startDate = sessionRecord?.startDate
+            ? new Date(sessionRecord.startDate)
+            : parsedYears
+                ? new Date(Number(parsedYears[1]), 3, 1)
+                : null;
+        const endDate = sessionRecord?.endDate
+            ? new Date(sessionRecord.endDate)
+            : parsedYears
+                ? new Date(Number(parsedYears[2]), 2, 31)
+                : null;
 
-        // Get all fee transactions within the session date range
-        const transactions = await FeeTransaction.find(activeRecordFilter({
-            receiptDate: {
-                $gte: startDate,
-                $lte: endDate
-            }
-        })).lean();
+        if (!startDate || !endDate || Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+            return res.status(400).json({
+                success: false,
+                message: 'Selected session does not have a valid date range'
+            });
+        }
 
-        // Group transactions by month and fee type
+        endDate.setHours(23, 59, 59, 999);
+
+        const transactionQuery = activeRecordFilter({
+            receiptDate: { $gte: startDate, $lte: endDate }
+        });
+
+        const [transactions, savedParticulars] = await Promise.all([
+            FeeTransaction.find(transactionQuery).lean(),
+            FeeParticular.find({ isActive: true }).sort({ name: 1 }).lean()
+        ]);
+
         const monthWiseData = {};
         const months = ['April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December', 'January', 'February', 'March'];
+        const particularNames = new Set(savedParticulars.map((particular) => particular.name).filter(Boolean));
 
-        // Initialize month data structure
+        transactions.forEach((transaction) => {
+            (transaction.lineItems || []).forEach((item) => {
+                if (item.particular) {
+                    particularNames.add(item.particular);
+                }
+            });
+        });
+
+        const particulars = Array.from(particularNames).sort((a, b) => a.localeCompare(b));
+
         months.forEach(month => {
             monthWiseData[month] = {
                 month,
-                tuitionFees: 0,
-                transports: 0,
-                admissionFees: 0,
-                readmissionFees: 0,
-                books: 0,
-                uniform: 0,
-                lateFine: 0
+                particulars: particulars.reduce((totals, particular) => {
+                    totals[particular] = 0;
+                    return totals;
+                }, {})
             };
         });
 
-        // Process transactions and group by month and fee type
         transactions.forEach(transaction => {
             const month = new Date(transaction.receiptDate || transaction.createdAt).toLocaleString('en-US', { month: 'long' });
             
             if (monthWiseData[month]) {
-                // Process line items to categorize fees
                 (transaction.lineItems || []).forEach(item => {
-                    const particular = item.particular.toLowerCase();
+                    const particular = String(item.particular || '').trim();
                     const amount = safeNumber(item.amount);
-                    
-                    if (particular.includes('tuition') || particular.includes('fees')) {
-                        monthWiseData[month].tuitionFees += amount;
-                    } else if (particular.includes('transport') || particular.includes('bus')) {
-                        monthWiseData[month].transports += amount;
-                    } else if (particular.includes('admission')) {
-                        monthWiseData[month].admissionFees += amount;
-                    } else if (particular.includes('readmission') || particular.includes('re-admission')) {
-                        monthWiseData[month].readmissionFees += amount;
-                    } else if (particular.includes('book')) {
-                        monthWiseData[month].books += amount;
-                    } else if (particular.includes('uniform')) {
-                        monthWiseData[month].uniform += amount;
-                    } else if (particular.includes('fine') || particular.includes('late')) {
-                        monthWiseData[month].lateFine += amount;
-                    } else {
-                        // Default to tuition fees if category is unclear
-                        monthWiseData[month].tuitionFees += amount;
+                    if (particular) {
+                        monthWiseData[month].particulars[particular] = safeNumber(monthWiseData[month].particulars[particular]) + amount;
                     }
                 });
             }
         });
 
-        // Convert to array for response
         const feeCollectionData = Object.values(monthWiseData);
+        const totals = particulars.reduce((summary, particular) => {
+            summary[particular] = feeCollectionData.reduce((sum, row) => sum + safeNumber(row.particulars?.[particular]), 0);
+            return summary;
+        }, {});
 
         return res.json({
             success: true,
             message: 'Fee collection data retrieved successfully',
+            session,
+            dateRange: { startDate, endDate },
+            particulars,
+            totals,
             feeCollectionData
         });
 

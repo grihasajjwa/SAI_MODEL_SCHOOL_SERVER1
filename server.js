@@ -6,9 +6,13 @@ const path = require('path');
 
 dotenv.config();
 
+if (!process.env.JWT_SECRET && process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET is required in production');
+}
+
 if (!process.env.JWT_SECRET) {
     process.env.JWT_SECRET = 'skyview-secret-key-123';
-    console.log('Using default JWT_SECRET');
+    console.log('Using default JWT_SECRET for local development');
 }
 
 const LOCAL_DEV_ORIGINS = new Set([
@@ -143,6 +147,13 @@ function registerRoutes(app) {
     const feeRoutes = require('./routes/fees');
     const schoolProfileRoutes = require('./routes/schoolProfile.routes');
     const questionPaperRoutes = require('./routes/questionPaper.routes');
+    const visitorRoutes = require('./routes/visitor.routes');
+    const fuelRoutes = require('./routes/fuel.routes');
+    const supplierRoutes = require('./routes/supplier.routes');
+    const examRoutineRoutes = require('./routes/examRoutine.routes');
+    const examNameRoutes = require('./routes/examName.routes');
+    const admitDatesheetRoutes = require('./routes/admitDatesheet.routes');
+    const salaryRoutes = require('./routes/salary.routes');
 
     app.use('/api/auth', authRoutes);
     app.use('/api/classes', classRoutes);
@@ -167,6 +178,13 @@ function registerRoutes(app) {
     app.use('/api/fees', feeRoutes);
     app.use('/api/school-profile', schoolProfileRoutes);
     app.use('/api/question-papers', questionPaperRoutes);
+    app.use('/api/visitors', visitorRoutes);
+    app.use('/api/fuel', fuelRoutes);
+    app.use('/api/suppliers', supplierRoutes);
+    app.use('/api/exam-routines', examRoutineRoutes);
+    app.use('/api/exam-names', examNameRoutes);
+    app.use('/api/admit-datesheets', admitDatesheetRoutes);
+    app.use('/api/salary', salaryRoutes);
 }
 
 function createApp() {

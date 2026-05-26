@@ -75,6 +75,12 @@ const feeTransactionSchema = new mongoose.Schema({
         trim: true,
         default: ''
     },
+    session: {
+        type: String,
+        trim: true,
+        default: '',
+        index: true
+    },
     month: {
         type: String,
         trim: true,
@@ -163,6 +169,7 @@ const feeTransactionSchema = new mongoose.Schema({
 });
 
 feeTransactionSchema.index({ admissionNo: 1, createdAt: -1 });
+feeTransactionSchema.index({ admissionNo: 1, session: 1, month: 1 });
 feeTransactionSchema.index({ month: 1, className: 1 });
 
 module.exports = mongoose.model('FeeTransaction', feeTransactionSchema);

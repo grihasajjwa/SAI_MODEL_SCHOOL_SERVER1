@@ -54,6 +54,28 @@ const expenseTransactionSchema = new mongoose.Schema({
         trim: true,
         default: ''
     },
+    salaryDetails: {
+        employeeName: {
+            type: String,
+            trim: true,
+            default: ''
+        },
+        salaryMonth: {
+            type: String,
+            trim: true,
+            default: ''
+        },
+        grossSalary: {
+            type: Number,
+            min: 0,
+            default: 0
+        },
+        advanceAdjusted: {
+            type: Number,
+            min: 0,
+            default: 0
+        }
+    },
     expenseDate: {
         type: Date,
         default: Date.now

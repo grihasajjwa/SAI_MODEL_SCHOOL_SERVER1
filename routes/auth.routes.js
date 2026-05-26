@@ -3,10 +3,39 @@ const router = express.Router();
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
+// Public role availability for signup page
+router.get('/admin-status', async (req, res) => {
+    try {
+        const adminExists = await User.exists({ role: 'admin' });
+        res.json({
+            success: true,
+            adminExists: !!adminExists
+        });
+    } catch (error) {
+        console.error('Admin status error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error checking admin status'
+        });
+    }
+});
+
 // Signup route
 router.post('/signup', async (req, res) => {
     try {
         const { firstName, lastName, email, username, password, role } = req.body;
+        const normalizedRole = role === 'admin' ? 'admin' : role;
+        const isFirstAdminSignup = normalizedRole === 'admin';
+
+        if (normalizedRole === 'admin') {
+            const adminExists = await User.exists({ role: 'admin' });
+            if (adminExists) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Admin account already exists'
+                });
+            }
+        }
 
         // Check if user already exists
         const existingUser = await User.findOne({
@@ -27,14 +56,17 @@ router.post('/signup', async (req, res) => {
             email,
             username,
             password,
-            role
+            role: normalizedRole,
+            isActive: isFirstAdminSignup
         });
 
         await user.save();
 
         res.status(201).json({
             success: true,
-            message: 'User created successfully'
+            message: isFirstAdminSignup
+                ? 'Admin account created successfully'
+                : 'Account created successfully. Please wait for admin approval before login.'
         });
     } catch (error) {
         console.error('Signup error:', error);
@@ -66,10 +98,17 @@ router.post('/login', async (req, res) => {
             isActive: user.isActive
         } : null);
 
-        if (!user || !user.isActive) {
+        if (!user) {
             return res.status(401).json({
                 success: false,
                 message: 'Invalid credentials'
+            });
+        }
+
+        if (!user.isActive) {
+            return res.status(403).json({
+                success: false,
+                message: 'Your account approval is pending. Please contact admin.'
             });
         }
 

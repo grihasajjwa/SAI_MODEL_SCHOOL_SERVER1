@@ -47,6 +47,16 @@ const schoolProfileSchema = new mongoose.Schema({
         trim: true,
         default: '/assets/images/logo1.png'
     },
+    idCardAddress: {
+        type: String,
+        trim: true,
+        default: 'Tufanganj, Coochbehar'
+    },
+    principalSignature: {
+        type: String,
+        trim: true,
+        default: '/assets/images/principal-signature1.png'
+    },
     watermarkText: {
         type: String,
         trim: true,

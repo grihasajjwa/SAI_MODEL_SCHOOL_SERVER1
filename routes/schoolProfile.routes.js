@@ -56,9 +56,9 @@ function uploadBufferToCloudinary(file, folder, publicIdPrefix) {
     });
 }
 
-async function persistSchoolLogo(file) {
+async function persistSchoolImage(file, publicIdPrefix) {
     if (hasCloudinaryConfig) {
-        const result = await uploadBufferToCloudinary(file, 'skyview/school-profile', 'school-logo');
+        const result = await uploadBufferToCloudinary(file, 'skyview/school-profile', publicIdPrefix);
         return { path: result.secure_url, storage: 'cloudinary' };
     }
 
@@ -67,10 +67,27 @@ async function persistSchoolLogo(file) {
     }
 
     await fs.promises.mkdir(uploadDir, { recursive: true });
-    const fileName = buildLocalFileName(file, 'school-logo');
+    const fileName = buildLocalFileName(file, publicIdPrefix);
     const targetPath = path.join(uploadDir, fileName);
     await fs.promises.writeFile(targetPath, file.buffer);
     return { path: `/uploads/school-profile/${fileName}`, storage: 'local' };
+}
+
+async function removeStoredSchoolImage(filePath) {
+    if (!filePath) return;
+
+    if (hasCloudinaryConfig && /^https?:\/\//i.test(filePath)) {
+        const segments = filePath.split('/');
+        const lastSegment = segments[segments.length - 1] || '';
+        const publicId = lastSegment.replace(/\.[^.]+$/, '');
+        cloudinary.uploader.destroy(`skyview/school-profile/${publicId}`).catch(() => {});
+        return;
+    }
+
+    if (filePath.startsWith('/uploads/school-profile/')) {
+        const previousPath = path.join(__dirname, '..', filePath.replace(/^\//, ''));
+        fs.promises.unlink(previousPath).catch(() => {});
+    }
 }
 
 const DEFAULT_PROFILE = {
@@ -83,6 +100,8 @@ const DEFAULT_PROFILE = {
     email: 'skyviewpublicschool@gmail.com',
     website: 'www.skyviewpublicschool.in',
     logo: '/assets/images/logo1.png',
+    idCardAddress: 'Tufanganj, Coochbehar',
+    principalSignature: '/assets/images/principal-signature1.png',
     watermarkText: 'SKYVIEW PUBLIC SCHOOL'
 };
 
@@ -104,14 +123,17 @@ router.get('/', async (req, res) => {
     }
 });
 
-router.put('/', auth, upload.single('logoFile'), async (req, res) => {
+router.put('/', auth, upload.fields([
+    { name: 'logoFile', maxCount: 1 },
+    { name: 'principalSignatureFile', maxCount: 1 }
+]), async (req, res) => {
     try {
         if (req.user.role !== 'admin') {
             return res.status(403).json({ success: false, message: 'Access denied' });
         }
 
         const profile = await getOrCreateSchoolProfile();
-        const fields = ['name', 'shortName', 'tagline', 'addressLine1', 'addressLine2', 'phone', 'email', 'website', 'watermarkText'];
+        const fields = ['name', 'shortName', 'tagline', 'addressLine1', 'addressLine2', 'phone', 'email', 'website', 'watermarkText', 'idCardAddress'];
 
         fields.forEach((field) => {
             if (req.body[field] !== undefined) {
@@ -119,7 +141,10 @@ router.put('/', auth, upload.single('logoFile'), async (req, res) => {
             }
         });
 
-        if (req.file) {
+        const logoFile = req.files?.logoFile?.[0];
+        const signatureFile = req.files?.principalSignatureFile?.[0];
+
+        if (logoFile) {
             if (isServerless && !hasCloudinaryConfig) {
                 return res.status(400).json({
                     success: false,
@@ -127,18 +152,24 @@ router.put('/', auth, upload.single('logoFile'), async (req, res) => {
                 });
             }
 
-            if (hasCloudinaryConfig && profile.logo && /^https?:\/\//i.test(profile.logo)) {
-                const segments = profile.logo.split('/');
-                const lastSegment = segments[segments.length - 1] || '';
-                const publicId = lastSegment.replace(/\.[^.]+$/, '');
-                cloudinary.uploader.destroy(`skyview/school-profile/${publicId}`).catch(() => {});
-            } else if (profile.logo && profile.logo.startsWith('/uploads/school-profile/')) {
-                const previousLogoPath = path.join(__dirname, '..', profile.logo.replace(/^\//, ''));
-                fs.promises.unlink(previousLogoPath).catch(() => {});
+            await removeStoredSchoolImage(profile.logo);
+
+            const storedLogo = await persistSchoolImage(logoFile, 'school-logo');
+            profile.logo = storedLogo.path;
+        }
+
+        if (signatureFile) {
+            if (isServerless && !hasCloudinaryConfig) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Principal signature upload requires Cloudinary configuration on Vercel.'
+                });
             }
 
-            const storedLogo = await persistSchoolLogo(req.file);
-            profile.logo = storedLogo.path;
+            await removeStoredSchoolImage(profile.principalSignature);
+
+            const storedSignature = await persistSchoolImage(signatureFile, 'principal-signature');
+            profile.principalSignature = storedSignature.path;
         }
 
         if (!profile.name) {
